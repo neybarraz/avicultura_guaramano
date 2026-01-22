@@ -1,0 +1,18 @@
+avicultura_dashboard/
+  app.py
+  dados/
+    (csvs)
+  core/
+    __init__.py
+    context.py
+    io.py
+    timeaxis.py
+    charts.py
+    diagnostics.py
+    navigation.py
+  blocks/
+    __init__.py
+    mistura.py
+    consumo.py
+    producao.py
+    qualidade.py
