@@ -172,17 +172,37 @@ def _render_chart_com_navegacao_lateral(
     date_col: str,
     janela_dias: int = JANELA_INICIAL_DIAS,
     passo_dias: int = PASSO_NAVEGACAO_DIAS,
+    limitar_largura_px: int | None = 720,  # coloque None se não quiser limitar
 ):
     """
-    Renderiza botões ◀ ▶ de navegação do eixo X.
+    Barra de navegação acima do gráfico:
+      [◀]   intervalo atual   [▶]
 
-    Implementação MOBILE-FRIENDLY:
-    - Em vez de botões "nas laterais" do gráfico (que quebram no celular),
-      ele coloca uma barra de navegação ACIMA do gráfico:
-        [◀]   (intervalo atual)   [▶]
-    - Cada clique move a janela em blocos de `passo_dias`.
+    Ajustes:
+    - Botões ficam estreitos (sem use_container_width).
+    - Opcional: limita largura do bloco para ficar parecido no PC e no celular.
     """
     today = pd.Timestamp.today().normalize()
+
+    # (Opcional) limita a largura do bloco (fica "mobile-like" no desktop)
+    if limitar_largura_px is not None:
+        st.markdown(
+            f"""
+            <style>
+              .producao-nav-wrap {{
+                max-width: {int(limitar_largura_px)}px;
+                margin-left: auto;
+                margin-right: auto;
+              }}
+              /* deixa os botões menores (apenas nesta área) */
+              .producao-nav-wrap div.stButton > button {{
+                padding: 0.25rem 0.6rem;
+                min-width: 2.6rem;
+              }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
 
     # Base do fim do eixo X (max entre hoje e último dado)
     if df_ref.empty or date_col not in df_ref.columns:
@@ -207,7 +227,6 @@ def _render_chart_com_navegacao_lateral(
     end_dt = end_base + pd.Timedelta(days=off)
     start_dt = end_dt - pd.Timedelta(days=max(0, janela_dias - 1))
 
-    # Formatação PT simples para o caption (não depende do Altair)
     def _fmt_pt(dt: pd.Timestamp) -> str:
         s = dt.strftime("%d/%b")
         return (
@@ -225,26 +244,33 @@ def _render_chart_com_navegacao_lateral(
             .replace("Dec", "DEZ")
         )
 
-    # Barra de navegação no topo (responsivo no celular)
-    c1, c2, c3 = st.columns([1, 6, 1], vertical_alignment="center")
+    # Wrapper (para aplicar max-width apenas nesta seção)
+    if limitar_largura_px is not None:
+        st.markdown("<div class='producao-nav-wrap'>", unsafe_allow_html=True)
+
+    # Barra de navegação
+    c1, c2, c3 = st.columns([1, 10, 1], vertical_alignment="center")
 
     with c1:
         clicked_left = st.button(
             "◀",
             key=f"{state_key}__btn_left",
             help=f"Voltar {passo_dias} dias",
-            use_container_width=True,
         )
 
     with c2:
-        st.caption(f"{_fmt_pt(start_dt)} — {_fmt_pt(end_dt)}")
+        st.markdown(
+            f"<div style='text-align:center; opacity:0.8; font-size:0.9rem;'>"
+            f"{_fmt_pt(start_dt)} — {_fmt_pt(end_dt)}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
     with c3:
         clicked_right = st.button(
             "▶",
             key=f"{state_key}__btn_right",
             help=f"Avançar {passo_dias} dias",
-            use_container_width=True,
         )
 
     if clicked_left:
@@ -257,6 +283,10 @@ def _render_chart_com_navegacao_lateral(
 
     # Gráfico
     st.altair_chart(chart.interactive(bind_y=False), use_container_width=True)
+
+    if limitar_largura_px is not None:
+        st.markdown("</div>", unsafe_allow_html=True)
+
 
 
 
