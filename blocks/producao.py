@@ -15,48 +15,8 @@ import altair as alt
 # =============================================================================
 # CONFIG LOCAL — mantém este block autocontido (sem depender de escala global)
 # =============================================================================
-JANELA_DESKTOP_DIAS: int = 7
-JANELA_MOBILE_DIAS: int = 3
-PASSO_MOBILE_DIAS: int = 3  # no celular, ao navegar, avança/volta de 3 em 3
-
-
-# =============================================================================
-# DETECÇÃO (best-effort) — celular vs desktop (sem toggle manual)
-# =============================================================================
-def _is_mobile_client() -> bool:
-    """
-    Detecção automática (best-effort) baseada em headers.
-    Se a versão do Streamlit não expor headers, assume desktop.
-    """
-    try:
-        ctx = getattr(st, "context", None)
-        if ctx is None:
-            return False
-
-        headers = getattr(ctx, "headers", None)
-        if not headers:
-            return False
-
-        sec_mobile = headers.get("sec-ch-ua-mobile") or headers.get("Sec-CH-UA-Mobile")
-        if isinstance(sec_mobile, str) and sec_mobile.strip() == "?1":
-            return True
-
-        ua = headers.get("user-agent") or headers.get("User-Agent") or ""
-        ua_l = ua.lower()
-
-        mobile_tokens = [
-            "android",
-            "iphone",
-            "ipad",
-            "ipod",
-            "mobile",
-            "windows phone",
-            "opera mini",
-            "blackberry",
-        ]
-        return any(t in ua_l for t in mobile_tokens)
-    except Exception:
-        return False
+JANELA_INICIAL_DIAS: int = 5   # exibir apenas 5 dias
+PASSO_NAVEGACAO_DIAS: int = 5  # andar 5 dias por clique
 
 
 # =============================================================================
@@ -95,53 +55,6 @@ def _make_x_axis_dia_pt(title: str = "Dia") -> alt.Axis:
     return alt.Axis(title=title, format="%d/%b", labelExpr=_pt_month_abbr_expr())
 
 
-def _build_x_axis_and_time_scale_like_temperatura(
-    df: pd.DataFrame,
-    date_col: str,
-    *,
-    title: str = "Dia",
-    janela_dias: int,
-    end_dt_override: Optional[pd.Timestamp] = None,
-) -> Tuple[alt.Axis, alt.Scale]:
-    """
-    Eixo X:
-      - end_dt_default = max(hoje, max_dt_dados)
-      - end_dt = end_dt_override se fornecido senão end_dt_default
-      - start_dt = max(min_dt, end_dt - janela)
-      - domain = [start_dt, end_dt]
-      - axis %d/%b + meses PT via labelExpr
-    """
-    axis = _make_x_axis_dia_pt(title)
-    today = pd.Timestamp.today().normalize()
-
-    if df.empty or date_col not in df.columns:
-        end_dt = end_dt_override if end_dt_override is not None else today
-        return axis, alt.Scale(domain=[end_dt, end_dt])
-
-    dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
-    if dates.empty:
-        end_dt = end_dt_override if end_dt_override is not None else today
-        start_dt = end_dt - pd.Timedelta(days=janela_dias)
-        return axis, alt.Scale(domain=[start_dt, end_dt])
-
-    min_dt = dates.min()
-    max_dt = dates.max()
-
-    max_dt_norm = max_dt.normalize() if hasattr(max_dt, "normalize") else max_dt
-    end_dt_default = max(today, max_dt_norm)
-
-    end_dt = end_dt_override if end_dt_override is not None else end_dt_default
-
-    # clamp
-    if end_dt > end_dt_default:
-        end_dt = end_dt_default
-    if end_dt < min_dt:
-        end_dt = min_dt
-
-    start_dt = max(min_dt, end_dt - pd.Timedelta(days=janela_dias))
-    return axis, alt.Scale(domain=[start_dt, end_dt])
-
-
 def _safe_num_max(series_list) -> float:
     vals = []
     for s in series_list:
@@ -164,26 +77,137 @@ def _safe_num_min(series_list) -> float:
     return float(min(vals)) if vals else 0.0
 
 
-def _compute_end_dt_default(df: pd.DataFrame, date_col: str) -> pd.Timestamp:
-    today = pd.Timestamp.today().normalize()
-    if df.empty or date_col not in df.columns:
-        return today
-    dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
-    if dates.empty:
-        return today
-    max_dt = dates.max()
-    max_dt_norm = max_dt.normalize() if hasattr(max_dt, "normalize") else max_dt
-    return max(today, max_dt_norm)
+def _clamp(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, v))
 
 
-def _compute_min_dt(df: pd.DataFrame, date_col: str) -> pd.Timestamp:
-    today = pd.Timestamp.today().normalize()
+def _get_nav_offset_days(state_key: str) -> int:
+    k = f"{state_key}__offset_days"
+    if k not in st.session_state:
+        st.session_state[k] = 0  # 0 = termina no end_base (normalmente hoje)
+    return int(st.session_state[k])
+
+
+def _set_nav_offset_days(state_key: str, value: int) -> None:
+    st.session_state[f"{state_key}__offset_days"] = int(value)
+
+
+def _compute_offset_bounds(
+    df: pd.DataFrame,
+    date_col: str,
+    *,
+    window_days: int,
+    base_end_dt: pd.Timestamp,
+) -> tuple[int, int]:
+    """
+    Retorna (min_offset_days, max_offset_days).
+    Regra:
+      - max_offset_days = 0 (não avançar além do "hoje"/fim base)
+      - min_offset_days = negativo o suficiente para a janela alcançar o min_dt
+    """
     if df.empty or date_col not in df.columns:
-        return today
+        return (0, 0)
+
     dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
     if dates.empty:
-        return today
-    return dates.min()
+        return (0, 0)
+
+    min_dt = dates.min().normalize()
+    # start_dt = end_dt - (window_days - 1)  => end_dt_min = min_dt + (window_days - 1)
+    end_dt_min = min_dt + pd.Timedelta(days=max(0, window_days - 1))
+
+    min_offset = int((end_dt_min - base_end_dt).days)  # geralmente negativo
+    max_offset = 0
+
+    if min_offset > 0:
+        min_offset = 0
+
+    return (min_offset, max_offset)
+
+
+def _build_x_axis_and_time_scale_navegavel(
+    df: pd.DataFrame,
+    date_col: str,
+    *,
+    title: str = "Dia",
+    janela_dias: int = JANELA_INICIAL_DIAS,
+    passo_dias: int = PASSO_NAVEGACAO_DIAS,
+    state_key: str,
+) -> Tuple[alt.Axis, alt.Scale]:
+    """
+    Eixo X com navegação por botões (janela fixa de `janela_dias`).
+    - end_base = max(hoje, max_dt_dados)
+    - offset (em dias) controlado por st.session_state[state_key]
+    - domain = [start_dt, end_dt] onde start_dt = end_dt - (janela_dias - 1)
+    """
+    axis = _make_x_axis_dia_pt(title)
+    today = pd.Timestamp.today().normalize()
+
+    if df.empty or date_col not in df.columns:
+        return axis, alt.Scale(domain=[today, today])
+
+    dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
+    if dates.empty:
+        end_base = today
+    else:
+        end_base = max(today, dates.max().normalize())
+
+    min_off, max_off = _compute_offset_bounds(df, date_col, window_days=janela_dias, base_end_dt=end_base)
+
+    off = _get_nav_offset_days(state_key)
+    off = _clamp(off, min_off, max_off)
+    _set_nav_offset_days(state_key, off)
+
+    end_dt = end_base + pd.Timedelta(days=off)
+    start_dt = end_dt - pd.Timedelta(days=max(0, janela_dias - 1))
+
+    return axis, alt.Scale(domain=[start_dt, end_dt])
+
+
+def _render_chart_com_navegacao_lateral(
+    chart: alt.Chart,
+    *,
+    state_key: str,
+    df_ref: pd.DataFrame,
+    date_col: str,
+    janela_dias: int = JANELA_INICIAL_DIAS,
+    passo_dias: int = PASSO_NAVEGACAO_DIAS,
+):
+    """
+    Renderiza botões ◀ ▶ nas laterais do gráfico; cada clique move a janela em blocos de `passo_dias`.
+    Os limites são calculados a partir de df_ref/date_col.
+    """
+    today = pd.Timestamp.today().normalize()
+    if df_ref.empty or date_col not in df_ref.columns:
+        end_base = today
+        min_off, max_off = (0, 0)
+    else:
+        dates = pd.to_datetime(df_ref[date_col], errors="coerce").dropna()
+        end_base = max(today, dates.max().normalize()) if not dates.empty else today
+        min_off, max_off = _compute_offset_bounds(df_ref, date_col, window_days=janela_dias, base_end_dt=end_base)
+
+    off = _get_nav_offset_days(state_key)
+    off = _clamp(off, min_off, max_off)
+    _set_nav_offset_days(state_key, off)
+
+    col_left, col_mid, col_right = st.columns([1, 18, 1], vertical_alignment="center")
+
+    with col_left:
+        clicked_left = st.button("◀", key=f"{state_key}__btn_left", help=f"Voltar {passo_dias} dias")
+
+    with col_right:
+        clicked_right = st.button("▶", key=f"{state_key}__btn_right", help=f"Avançar {passo_dias} dias")
+
+    if clicked_left:
+        _set_nav_offset_days(state_key, _clamp(off - passo_dias, min_off, max_off))
+        st.rerun()
+
+    if clicked_right:
+        _set_nav_offset_days(state_key, _clamp(off + passo_dias, min_off, max_off))
+        st.rerun()
+
+    with col_mid:
+        st.altair_chart(chart.interactive(bind_y=False), use_container_width=True)
 
 
 def render_producao(
@@ -195,29 +219,14 @@ def render_producao(
     chart_serie_altair: Callable,       # mantido por compatibilidade (não usado aqui)
 ):
     """
-    Desktop:
-      - janela X = 7 dias
-      - mantém .interactive(bind_y=False) como estava
+    Renderiza a SEÇÃO: PRODUÇÃO E PERDAS (USANDO producao_ovos.csv)
 
-    Mobile:
-      - janela X = 3 dias
-      - navegação discreta (±3 dias) por botões (evita pan/drag)
-      - clamp do offset para não “sumir” com o gráfico
-      - simplifica o spec (remove mark_text e tooltip) para evitar gráfico em branco
+    Observação:
+    - Este block controla o eixo X localmente e agora tem navegação por botões (◀ ▶),
+      exibindo somente 5 dias por vez e movendo 5 dias por clique.
     """
 
     st.markdown("<div id='producao' style='position: relative; top: -40px;'></div>", unsafe_allow_html=True)
-
-    is_mobile = _is_mobile_client()
-
-    # Em mobile, reduzir peso do Vega/Altair (evita “área em branco”)
-    MOBILE_REMOVER_TEXTOS = True
-    MOBILE_REMOVER_TOOLTIP = True  # importante: no seu caso isso tende a resolver o “não aparece”
-
-    # Estado da navegação em mobile
-    state_key = "producao_offset_days"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = 0  # 0 = janela termina em (hoje ou max_dt)
 
     # =============================================================================
     # 1) LEITURA DO CSV PRINCIPAL
@@ -348,6 +357,7 @@ def render_producao(
 
         df_gerais_sorted = df_gerais.sort_values("data_ref")[["data_ref", "aves_atual"]].copy()
         df_gerais_sorted["data_ref"] = pd.to_datetime(df_gerais_sorted["data_ref"], errors="coerce")
+
         df_gerais_sorted = df_gerais_sorted.dropna(subset=["data_ref"]).drop_duplicates(subset=["data_ref"])
 
         df_ovos = pd.merge_asof(
@@ -367,7 +377,7 @@ def render_producao(
         df_ovos["ovos_max_teor"] = np.nan
 
     # =============================================================================
-    # ESCALA Y GLOBAL (±20%) — considera também a faixa teórica
+    # ESCALA Y GLOBAL (±20%) — CONSIDERA TAMBÉM A FAIXA TEÓRICA
     # =============================================================================
     max_prod = _safe_num_max(
         [
@@ -392,46 +402,17 @@ def render_producao(
     y_scale_global = alt.Scale(domain=[y_min_global, y_max_global])
 
     # =============================================================================
-    # X domain: desktop padrão | mobile paginado (±3 dias), com CLAMP do offset
+    # 6) GRÁFICO 1: ovos_granja x tempo + FAIXA TEÓRICA 85–95% (dinâmica)
     # =============================================================================
-    end_dt_default = _compute_end_dt_default(df_ovos, "data")
-    min_dt_ovos = _compute_min_dt(df_ovos, "data")
+    x_axis_ovos, x_scale_ovos = _build_x_axis_and_time_scale_navegavel(
+        df_ovos,
+        "data",
+        title="Dia",
+        janela_dias=JANELA_INICIAL_DIAS,
+        passo_dias=PASSO_NAVEGACAO_DIAS,
+        state_key="producao__ovos_granja_x",
+    )
 
-    if is_mobile:
-        # clamp do offset (múltiplo de 3) para não cair fora do dataset
-        max_offset_days = max(0, int((end_dt_default - min_dt_ovos).days))
-        max_offset_days = (max_offset_days // PASSO_MOBILE_DIAS) * PASSO_MOBILE_DIAS
-
-        offset_days = int(st.session_state[state_key])
-        offset_days = (max(0, offset_days) // PASSO_MOBILE_DIAS) * PASSO_MOBILE_DIAS
-
-        if offset_days > max_offset_days:
-            offset_days = 0
-
-        st.session_state[state_key] = offset_days
-
-        end_dt_override = end_dt_default - pd.Timedelta(days=offset_days)
-        if end_dt_override < min_dt_ovos:
-            end_dt_override = min_dt_ovos
-
-        x_axis_ovos, x_scale_ovos = _build_x_axis_and_time_scale_like_temperatura(
-            df_ovos,
-            "data",
-            title="Dia",
-            janela_dias=JANELA_MOBILE_DIAS,
-            end_dt_override=end_dt_override,
-        )
-    else:
-        x_axis_ovos, x_scale_ovos = _build_x_axis_and_time_scale_like_temperatura(
-            df_ovos,
-            "data",
-            title="Dia",
-            janela_dias=JANELA_DESKTOP_DIAS,
-        )
-
-    # =============================================================================
-    # 5) GRÁFICO 1: ovos_granja x tempo + FAIXA TEÓRICA 85–95%
-    # =============================================================================
     base_ovos = alt.Chart(df_ovos).encode(
         x=alt.X("data:T", axis=x_axis_ovos, scale=x_scale_ovos)
     )
@@ -450,26 +431,23 @@ def render_producao(
     )
     camadas_ovos.append(linha_ovos)
 
-    tooltip_ovos = None if (is_mobile and MOBILE_REMOVER_TOOLTIP) else [
-        alt.Tooltip("data:T", title="Dia"),
-        alt.Tooltip("ovos_granja:Q", title="Ovos (granja)", format=".0f"),
-        alt.Tooltip("aves_atual:Q", title="Aves atuais", format=".0f"),
-        alt.Tooltip("ovos_min_teor:Q", title="Faixa mínima teórica", format=".0f"),
-        alt.Tooltip("ovos_max_teor:Q", title="Faixa máxima teórica", format=".0f"),
-    ]
-
-    pontos_ovos = base_ovos.mark_point(size=50 if is_mobile else 60).encode(
+    pontos_ovos = base_ovos.mark_point(size=60).encode(
         y=alt.Y("ovos_granja:Q", scale=y_scale_global),
-        tooltip=tooltip_ovos,
+        tooltip=[
+            alt.Tooltip("data:T", title="Dia"),
+            alt.Tooltip("ovos_granja:Q", title="Ovos (granja)", format=".0f"),
+            alt.Tooltip("aves_atual:Q", title="Aves atuais", format=".0f"),
+            alt.Tooltip("ovos_min_teor:Q", title="Faixa mínima teórica", format=".0f"),
+            alt.Tooltip("ovos_max_teor:Q", title="Faixa máxima teórica", format=".0f"),
+        ],
     )
     camadas_ovos.append(pontos_ovos)
 
-    if not (is_mobile and MOBILE_REMOVER_TEXTOS):
-        textos_ovos = base_ovos.mark_text(dy=-20, fontSize=10, color="white").encode(
-            y=alt.Y("ovos_granja:Q", scale=y_scale_global),
-            text=alt.Text("ovos_granja:Q", format=".0f"),
-        )
-        camadas_ovos.append(textos_ovos)
+    textos_ovos = base_ovos.mark_text(dy=-20, fontSize=10, color="white").encode(
+        y=alt.Y("ovos_granja:Q", scale=y_scale_global),
+        text=alt.Text("ovos_granja:Q", format=".0f"),
+    )
+    camadas_ovos.append(textos_ovos)
 
     chart_ovos_granja = alt.layer(*camadas_ovos).properties(
         height=250,
@@ -477,25 +455,17 @@ def render_producao(
     )
 
     st.markdown("### Produção diária de ovos – granja")
-
-    if is_mobile:
-        c1, c2, c3 = st.columns([1, 1, 1])
-        with c1:
-            if st.button("◀ 3 dias", key="prod_prev_3d", use_container_width=True):
-                st.session_state[state_key] = int(st.session_state[state_key]) + PASSO_MOBILE_DIAS
-        with c2:
-            if st.button("Hoje", key="prod_today", use_container_width=True):
-                st.session_state[state_key] = 0
-        with c3:
-            if st.button("3 dias ▶", key="prod_next_3d", use_container_width=True):
-                st.session_state[state_key] = max(0, int(st.session_state[state_key]) - PASSO_MOBILE_DIAS)
-
-        st.altair_chart(chart_ovos_granja, use_container_width=True)
-    else:
-        st.altair_chart(chart_ovos_granja.interactive(bind_y=False), use_container_width=True)
+    _render_chart_com_navegacao_lateral(
+        chart_ovos_granja,
+        state_key="producao__ovos_granja_x",
+        df_ref=df_ovos,
+        date_col="data",
+        janela_dias=JANELA_INICIAL_DIAS,
+        passo_dias=PASSO_NAVEGACAO_DIAS,
+    )
 
     # =============================================================================
-    # 6) GRÁFICO 2: granja vs escola
+    # 7) GRÁFICO 2: granja vs escola
     # =============================================================================
     df_prod = df_producao_filtrado[["data", "ovos_granja", "ovos_escola"]].dropna(
         subset=["ovos_granja", "ovos_escola"]
@@ -509,27 +479,14 @@ def render_producao(
             value_name="ovos",
         )
 
-        if is_mobile:
-            end_dt_default_2 = _compute_end_dt_default(df_long, "data")
-            min_dt_2 = _compute_min_dt(df_long, "data")
-            end_dt_override_2 = end_dt_default_2 - pd.Timedelta(days=int(st.session_state[state_key]))
-            if end_dt_override_2 < min_dt_2:
-                end_dt_override_2 = min_dt_2
-
-            x_axis_2, x_scale_2 = _build_x_axis_and_time_scale_like_temperatura(
-                df_long,
-                "data",
-                title="Dia",
-                janela_dias=JANELA_MOBILE_DIAS,
-                end_dt_override=end_dt_override_2,
-            )
-        else:
-            x_axis_2, x_scale_2 = _build_x_axis_and_time_scale_like_temperatura(
-                df_long,
-                "data",
-                title="Dia",
-                janela_dias=JANELA_DESKTOP_DIAS,
-            )
+        x_axis_2, x_scale_2 = _build_x_axis_and_time_scale_navegavel(
+            df_long,
+            "data",
+            title="Dia",
+            janela_dias=JANELA_INICIAL_DIAS,
+            passo_dias=PASSO_NAVEGACAO_DIAS,
+            state_key="producao__granja_vs_escola_x",
+        )
 
         color_def = alt.Color(
             "origem:N",
@@ -554,12 +511,6 @@ def render_producao(
             ),
         )
 
-        tooltip_prod = None if (is_mobile and MOBILE_REMOVER_TOOLTIP) else [
-            alt.Tooltip("data:T", title="Dia"),
-            alt.Tooltip("origem:N", title="Origem"),
-            alt.Tooltip("ovos:Q", title="Ovos", format=".0f"),
-        ]
-
         chart_prod = (
             alt.Chart(df_long)
             .mark_line()
@@ -567,58 +518,55 @@ def render_producao(
                 x=alt.X("data:T", axis=x_axis_2, scale=x_scale_2),
                 y=alt.Y("ovos:Q", title="Produção de ovos (unid./dia)", scale=y_scale_global),
                 color=color_def,
-                tooltip=tooltip_prod,
+                tooltip=[
+                    alt.Tooltip("data:T", title="Dia"),
+                    alt.Tooltip("origem:N", title="Origem"),
+                    alt.Tooltip("ovos:Q", title="Ovos", format=".0f"),
+                ],
             )
         )
 
         pontos_prod = (
             alt.Chart(df_long)
-            .mark_point(size=40 if is_mobile else 50)
+            .mark_point(size=50)
             .encode(
                 x=alt.X("data:T", axis=x_axis_2, scale=x_scale_2),
                 y=alt.Y("ovos:Q", title="Produção de ovos (unid./dia)", scale=y_scale_global),
                 color=color_def,
-                tooltip=tooltip_prod,
+                tooltip=[
+                    alt.Tooltip("data:T", title="Dia"),
+                    alt.Tooltip("origem:N", title="Origem"),
+                    alt.Tooltip("ovos:Q", title="Ovos", format=".0f"),
+                ],
             )
         )
 
         st.markdown("### Produção diária de ovos (granja vs. escola)")
-        chart_2 = (chart_prod + pontos_prod).properties(height=300)
-
-        if is_mobile:
-            st.altair_chart(chart_2, use_container_width=True)
-        else:
-            st.altair_chart(chart_2.interactive(bind_y=False), use_container_width=True)
+        _render_chart_com_navegacao_lateral(
+            (chart_prod + pontos_prod).properties(height=300),
+            state_key="producao__granja_vs_escola_x",
+            df_ref=df_long,
+            date_col="data",
+            janela_dias=JANELA_INICIAL_DIAS,
+            passo_dias=PASSO_NAVEGACAO_DIAS,
+        )
 
     # =============================================================================
-    # 7) GRÁFICO 3: perdas (granja → escola)
+    # 8) GRÁFICO 3: perdas (granja → escola)
     # =============================================================================
     df_perdas = df_producao_filtrado[["data", "perda_ovos"]].dropna(subset=["perda_ovos"]).copy()
 
     if not df_perdas.empty:
         df_perdas = df_perdas.sort_values("data").copy()
 
-        if is_mobile:
-            end_dt_default_3 = _compute_end_dt_default(df_perdas, "data")
-            min_dt_3 = _compute_min_dt(df_perdas, "data")
-            end_dt_override_3 = end_dt_default_3 - pd.Timedelta(days=int(st.session_state[state_key]))
-            if end_dt_override_3 < min_dt_3:
-                end_dt_override_3 = min_dt_3
-
-            x_axis_3, x_scale_3 = _build_x_axis_and_time_scale_like_temperatura(
-                df_perdas,
-                "data",
-                title="Dia",
-                janela_dias=JANELA_MOBILE_DIAS,
-                end_dt_override=end_dt_override_3,
-            )
-        else:
-            x_axis_3, x_scale_3 = _build_x_axis_and_time_scale_like_temperatura(
-                df_perdas,
-                "data",
-                title="Dia",
-                janela_dias=JANELA_DESKTOP_DIAS,
-            )
+        x_axis_3, x_scale_3 = _build_x_axis_and_time_scale_navegavel(
+            df_perdas,
+            "data",
+            title="Dia",
+            janela_dias=JANELA_INICIAL_DIAS,
+            passo_dias=PASSO_NAVEGACAO_DIAS,
+            state_key="producao__perdas_x",
+        )
 
         max_perdas = pd.to_numeric(df_perdas["perda_ovos"], errors="coerce").max()
         min_perdas = pd.to_numeric(df_perdas["perda_ovos"], errors="coerce").min()
@@ -632,34 +580,34 @@ def render_producao(
 
         y_scale_perdas = alt.Scale(domain=[y_min_perdas, y_max_perdas])
 
-        tooltip_perdas = None if (is_mobile and MOBILE_REMOVER_TOOLTIP) else [
-            alt.Tooltip("data:T", title="Dia"),
-            alt.Tooltip("perda_ovos:Q", title="Perdas (ovos)", format=".0f"),
-        ]
-
         base_perdas = alt.Chart(df_perdas).encode(
             x=alt.X("data:T", axis=x_axis_3, scale=x_scale_3),
-            tooltip=tooltip_perdas,
+            tooltip=[
+                alt.Tooltip("data:T", title="Dia"),
+                alt.Tooltip("perda_ovos:Q", title="Perdas (ovos)", format=".0f"),
+            ],
         )
 
         barras = base_perdas.mark_bar(color="#d62728").encode(
             y=alt.Y("perda_ovos:Q", title="Perdas (ovos)", scale=y_scale_perdas),
         )
 
-        if is_mobile and MOBILE_REMOVER_TEXTOS:
-            chart_perdas = barras.properties(height=260)
-        else:
-            rotulos = base_perdas.mark_text(dy=-10, fontSize=10, color="white").encode(
-                y=alt.Y("perda_ovos:Q", scale=y_scale_perdas),
-                text=alt.Text("perda_ovos:Q", format=".0f"),
-            )
-            chart_perdas = (barras + rotulos).properties(height=260)
+        rotulos = base_perdas.mark_text(dy=-10, fontSize=10, color="white").encode(
+            y=alt.Y("perda_ovos:Q", scale=y_scale_perdas),
+            text=alt.Text("perda_ovos:Q", format=".0f"),
+        )
+
+        chart_perdas = (barras + rotulos).properties(height=260)
 
         st.markdown("### Perdas no trajeto (granja → escola)")
-        if is_mobile:
-            st.altair_chart(chart_perdas, use_container_width=True)
-        else:
-            st.altair_chart(chart_perdas.interactive(bind_y=False), use_container_width=True)
+        _render_chart_com_navegacao_lateral(
+            chart_perdas,
+            state_key="producao__perdas_x",
+            df_ref=df_perdas,
+            date_col="data",
+            janela_dias=JANELA_INICIAL_DIAS,
+            passo_dias=PASSO_NAVEGACAO_DIAS,
+        )
 
     # =============================================================================
     # 9) GRÁFICO: TAXA DE POSTURA (%)
@@ -692,27 +640,14 @@ def render_producao(
 
             y_scale_postura = alt.Scale(domain=[y_min_postura, y_max_postura])
 
-            if is_mobile:
-                end_dt_default_p = _compute_end_dt_default(df_postura, "data")
-                min_dt_p = _compute_min_dt(df_postura, "data")
-                end_dt_override_p = end_dt_default_p - pd.Timedelta(days=int(st.session_state[state_key]))
-                if end_dt_override_p < min_dt_p:
-                    end_dt_override_p = min_dt_p
-
-                x_axis_p, x_scale_p = _build_x_axis_and_time_scale_like_temperatura(
-                    df_postura,
-                    "data",
-                    title="Dia",
-                    janela_dias=JANELA_MOBILE_DIAS,
-                    end_dt_override=end_dt_override_p,
-                )
-            else:
-                x_axis_p, x_scale_p = _build_x_axis_and_time_scale_like_temperatura(
-                    df_postura,
-                    "data",
-                    title="Dia",
-                    janela_dias=JANELA_DESKTOP_DIAS,
-                )
+            x_axis_p, x_scale_p = _build_x_axis_and_time_scale_navegavel(
+                df_postura,
+                "data",
+                title="Dia",
+                janela_dias=JANELA_INICIAL_DIAS,
+                passo_dias=PASSO_NAVEGACAO_DIAS,
+                state_key="producao__postura_x",
+            )
 
             base_postura = alt.Chart(df_postura).encode(
                 x=alt.X("data:T", axis=x_axis_p, scale=x_scale_p)
@@ -736,38 +671,39 @@ def render_producao(
             )
             camadas_postura.append(linha_postura)
 
-            tooltip_postura = None if (is_mobile and MOBILE_REMOVER_TOOLTIP) else [
-                alt.Tooltip("data:T", title="Dia"),
-                alt.Tooltip("ovos_granja:Q", title="Ovos (granja)", format=".0f"),
-                alt.Tooltip("aves_atual:Q", title="Aves atuais", format=".0f"),
-                alt.Tooltip("postura_pct:Q", title="Postura (%)", format=".1f"),
-            ]
-
-            pontos_postura = base_postura.mark_point(size=50 if is_mobile else 60).encode(
+            pontos_postura = base_postura.mark_point(size=60).encode(
                 y=alt.Y("postura_pct:Q", scale=y_scale_postura),
-                tooltip=tooltip_postura,
+                tooltip=[
+                    alt.Tooltip("data:T", title="Dia"),
+                    alt.Tooltip("ovos_granja:Q", title="Ovos (granja)", format=".0f"),
+                    alt.Tooltip("aves_atual:Q", title="Aves atuais", format=".0f"),
+                    alt.Tooltip("postura_pct:Q", title="Postura (%)", format=".1f"),
+                ],
             )
             camadas_postura.append(pontos_postura)
 
-            if not (is_mobile and MOBILE_REMOVER_TEXTOS):
-                textos_postura = base_postura.mark_text(dy=-20, fontSize=10, color="white").encode(
-                    y=alt.Y("postura_pct:Q", scale=y_scale_postura),
-                    text=alt.Text("postura_pct:Q", format=".1f"),
-                )
-                camadas_postura.append(textos_postura)
+            textos_postura = base_postura.mark_text(dy=-20, fontSize=10, color="white").encode(
+                y=alt.Y("postura_pct:Q", scale=y_scale_postura),
+                text=alt.Text("postura_pct:Q", format=".1f"),
+            )
+            camadas_postura.append(textos_postura)
 
             chart_postura = alt.layer(*camadas_postura).properties(
                 height=260,
                 title="Taxa de postura diária (%) — referência teórica 85–95%",
             )
 
-            if is_mobile:
-                st.altair_chart(chart_postura, use_container_width=True)
-            else:
-                st.altair_chart(chart_postura.interactive(bind_y=False), use_container_width=True)
+            _render_chart_com_navegacao_lateral(
+                chart_postura,
+                state_key="producao__postura_x",
+                df_ref=df_postura,
+                date_col="data",
+                janela_dias=JANELA_INICIAL_DIAS,
+                passo_dias=PASSO_NAVEGACAO_DIAS,
+            )
 
     # =============================================================================
-    # 8) DIAGNÓSTICO AGREGADO
+    # 10) DIAGNÓSTICO AGREGADO
     # =============================================================================
     total_granja = float(pd.to_numeric(df_producao_filtrado["ovos_granja"], errors="coerce").sum())
     total_escola = float(pd.to_numeric(df_producao_filtrado["ovos_escola"], errors="coerce").sum())
@@ -775,15 +711,15 @@ def render_producao(
 
     st.markdown(
         f"""
-        **Diagnóstico de produção e perdas (período filtrado):**
+        **Diagnóstico de produção e perdas (período filtrado):**  
 
-        - Total produzido na granja: **{total_granja:.0f} ovos**
-        - Total registrado na escola: **{total_escola:.0f} ovos**
-        - Diferença absoluta (perdas acumuladas): **{total_perdas:.0f} ovos**
+        - Total produzido na granja: **{total_granja:.0f} ovos**  
+        - Total registrado na escola: **{total_escola:.0f} ovos**  
+        - Diferença absoluta (perdas acumuladas): **{total_perdas:.0f} ovos**  
 
-        Se a diferença for recorrente e significativa, vale investigar:
-        - acondicionamento das bandejas e proteção durante o transporte;
-        - conferência de contagem na saída da granja e na chegada à escola;
+        Se a diferença for recorrente e significativa, vale investigar:  
+        - acondicionamento das bandejas e proteção durante o transporte;  
+        - conferência de contagem na saída da granja e na chegada à escola;  
         - registro diário em planilhas para rastrear dias mais críticos.
         """
     )
