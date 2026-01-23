@@ -10,15 +10,12 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import altair as alt
-import streamlit.components.v1 as components
-
 
 
 # =============================================================================
 # CONFIG LOCAL — mantém este block autocontido (sem depender de escala global)
 # =============================================================================
 JANELA_INICIAL_DIAS: int = 7  # mesma ideia do CFG.janela_inicial_dias no bloco temperatura
-ALTURA_GRAFICOS: int = 380
 
 
 # =============================================================================
@@ -63,17 +60,10 @@ def _build_x_axis_and_time_scale_like_temperatura(
     *,
     title: str = "Dia",
     janela_dias: int = JANELA_INICIAL_DIAS,
-    end_dt_override: Optional[pd.Timestamp] = None,
 ) -> Tuple[alt.Axis, alt.Scale]:
     """
-    Eixo X igual aos outros blocos, mas com opção de "navegação" no celular via end_dt_override.
-
-    Regras:
-      - max_end = max(hoje, max_dt_dados)
-      - min_end = min_dt_dados (ou hoje se dataset vazio)
-      - end_dt:
-          * se end_dt_override informado -> clamp entre [min_end, max_end]
-          * senão -> max_end
+    Eixo X igual aos outros blocos:
+      - end_dt = max(hoje, max_dt_dados)
       - start_dt = max(min_dt, end_dt - janela)
       - domain = [start_dt, end_dt]
       - axis %d/%b + meses PT via labelExpr
@@ -82,35 +72,21 @@ def _build_x_axis_and_time_scale_like_temperatura(
     today = pd.Timestamp.today().normalize()
 
     if df.empty or date_col not in df.columns:
-        end_dt = today
-        start_dt = today
-        return axis, alt.Scale(domain=[start_dt, end_dt])
+        return axis, alt.Scale(domain=[today, today])
 
     dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
     if dates.empty:
-        max_end = today
-        end_dt = end_dt_override.normalize() if isinstance(end_dt_override, pd.Timestamp) else today
-        end_dt = min(max_end, max(today - pd.Timedelta(days=3650), end_dt))  # clamp leve
-        start_dt = end_dt - pd.Timedelta(days=janela_dias)
+        end_dt = today
+        start_dt = today - pd.Timedelta(days=janela_dias)
         return axis, alt.Scale(domain=[start_dt, end_dt])
 
     min_dt = dates.min()
     max_dt = dates.max()
 
-    min_dt_norm = min_dt.normalize() if hasattr(min_dt, "normalize") else min_dt
     max_dt_norm = max_dt.normalize() if hasattr(max_dt, "normalize") else max_dt
+    end_dt = max(today, max_dt_norm)
+    start_dt = max(min_dt, end_dt - pd.Timedelta(days=janela_dias))
 
-    max_end = max(today, max_dt_norm)
-    min_end = min_dt_norm
-
-    if isinstance(end_dt_override, pd.Timestamp):
-        end_dt = end_dt_override.normalize()
-        # clamp para não "sumir" fora do histórico
-        end_dt = min(max_end, max(min_end, end_dt))
-    else:
-        end_dt = max_end
-
-    start_dt = max(min_dt_norm, end_dt - pd.Timedelta(days=janela_dias))
     return axis, alt.Scale(domain=[start_dt, end_dt])
 
 
@@ -147,11 +123,11 @@ def render_producao(
     """
     Renderiza a SEÇÃO: PRODUÇÃO E PERDAS (USANDO producao_ovos.csv)
 
-    Ajustes desta versão:
-      - Controle simples e discreto para "navegar" o eixo X (Data final da janela).
-      - Aumenta a altura dos gráficos para 380.
-      - Mantém o padrão de meses PT e janela fixa (JANELA_INICIAL_DIAS).
+    Observação:
+    - Este block controla o eixo X localmente (padrão igual ao da temperatura média),
+      para evitar acoplamento e garantir consistência visual.
     """
+
     st.markdown("<div id='producao' style='position: relative; top: -40px;'></div>", unsafe_allow_html=True)
 
     # =============================================================================
@@ -193,6 +169,7 @@ def render_producao(
     df_producao = df_producao.dropna(subset=["data"]).copy()
 
     for col in ["ovos_granja", "ovos_escola"]:
+        # tolerante a vírgula decimal
         df_producao[col] = (
             df_producao[col]
             .astype(str)
@@ -215,6 +192,7 @@ def render_producao(
             df_tmp.columns = [c.strip() for c in df_tmp.columns]
 
             if "data_ref" in df_tmp.columns:
+                # aceita dd/mm/aaaa (estrito) e é tolerante a espaços
                 df_tmp["data_ref"] = pd.to_datetime(
                     df_tmp["data_ref"].astype(str).str.strip(),
                     format="%d/%m/%Y",
@@ -253,8 +231,7 @@ def render_producao(
         return
 
     # =============================================================================
-    # Força a data de HOJE existir no dataset para permitir domínio até hoje
-    # (mas agora a navegação do eixo X fica por conta do slider de data final)
+    # Força a data de HOJE existir no dataset para o eixo X ir até hoje
     # =============================================================================
     today = pd.Timestamp.today().normalize()
     if not (df_producao_filtrado["data"].dt.normalize() == today).any():
@@ -274,119 +251,19 @@ def render_producao(
         ).sort_values("data")
 
     # =============================================================================
-    # CONTROLE DISCRETO FIXO NO RODAPÉ (MOBILE-FRIENDLY)
-    # =============================================================================
-    datas_validas = pd.to_datetime(df_producao_filtrado["data"], errors="coerce").dropna()
-    min_dt_global = datas_validas.min().normalize() if not datas_validas.empty else today
-    max_dt_global = max(today, datas_validas.max().normalize() if not datas_validas.empty else today)
-
-    key_end = "producao_x_end_dt"
-    if key_end not in st.session_state:
-        st.session_state[key_end] = max_dt_global
-
-    st.session_state[key_end] = min(max_dt_global, max(min_dt_global, st.session_state[key_end]))
-
-    # 1) Criar “slot” fixo no rodapé
-    st.markdown(
-        """
-        <style>
-          /* Barra fixa no rodapé */
-          #producao-nav-footer {
-            position: fixed;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            z-index: 9999;
-            padding: 8px 12px;
-            background: rgba(15, 15, 15, 0.92);
-            border-top: 1px solid rgba(255, 255, 255, 0.12);
-            backdrop-filter: blur(6px);
-          }
-
-          /* Título discreto */
-          #producao-nav-footer .title {
-            font-size: 12px;
-            opacity: 0.85;
-            margin: 0 0 6px 0;
-            line-height: 1;
-          }
-
-          /* Espaço extra no fim da página para não cobrir o último gráfico */
-          .producao-bottom-spacer {
-            height: 78px; /* ajuste fino se quiser mais/menos */
-          }
-
-          /* Deixa o slider mais “baixo” visualmente */
-          #producao-nav-footer [data-baseweb="slider"] {
-            margin-top: -6px;
-          }
-        </style>
-
-        <div id="producao-nav-footer">
-          <div class="title">Navegação do eixo X (data final da janela)</div>
-          <div id="producao-nav-slot"></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # 2) Renderizar o slider no fluxo normal, mas com um wrapper identificável
-    st.markdown('<div id="producao-slider-wrapper"></div>', unsafe_allow_html=True)
-    end_date = st.slider(
-        "Data final",  # label curto (vai ficar “escondido” pela barra fixa)
-        min_value=min_dt_global.date(),
-        max_value=max_dt_global.date(),
-        value=st.session_state[key_end].date(),
-        key="producao_x_end_dt_slider",
-        label_visibility="collapsed",
-    )
-    end_dt_override = pd.Timestamp(end_date).normalize()
-    st.session_state[key_end] = end_dt_override
-
-    # 3) Mover o slider para dentro do rodapé fixo via JS
-    components.html(
-        """
-        <script>
-          (function() {
-            // Procura o slider recém-renderizado (o container do widget)
-            // Streamlit usa estrutura interna, então buscamos o primeiro slider do bloco atual.
-            const footerSlot = parent.document.querySelector("#producao-nav-slot");
-            if (!footerSlot) return;
-
-            // Pega o último slider da página (normalmente é o nosso, por estar logo acima deste script)
-            const sliders = parent.document.querySelectorAll('[data-baseweb="slider"]');
-            if (!sliders || sliders.length === 0) return;
-
-            const sliderEl = sliders[sliders.length - 1];
-            // Sobe para um container “seguro” do widget (evita quebrar o layout)
-            const widgetContainer = sliderEl.closest('div[data-testid="stSlider"]') || sliderEl.parentElement;
-
-            // Evita duplicar ao rerun
-            if (widgetContainer && !footerSlot.contains(widgetContainer)) {
-              footerSlot.appendChild(widgetContainer);
-            }
-          })();
-        </script>
-        """,
-        height=0,
-    )
-
-    # 4) Espaçador no final da seção para o rodapé não cobrir conteúdo
-    st.markdown('<div class="producao-bottom-spacer"></div>', unsafe_allow_html=True)
-
-
-    # =============================================================================
     # 5) Preparação do dataset do Gráfico 1 (com merge e faixa teórica variável)
     # =============================================================================
     df_ovos = df_producao_filtrado[["data", "ovos_granja"]].copy().sort_values("data")
 
     if df_gerais is not None and {"data_ref", "aves_atual"}.issubset(df_gerais.columns):
+        # merge_asof exige ordenação e tipos datetime
         df_ovos = df_ovos.sort_values("data").copy()
         df_ovos["data"] = pd.to_datetime(df_ovos["data"], errors="coerce")
 
         df_gerais_sorted = df_gerais.sort_values("data_ref")[["data_ref", "aves_atual"]].copy()
         df_gerais_sorted["data_ref"] = pd.to_datetime(df_gerais_sorted["data_ref"], errors="coerce")
 
+        # remove duplicatas de data_ref para evitar comportamento inesperado
         df_gerais_sorted = df_gerais_sorted.dropna(subset=["data_ref"]).drop_duplicates(subset=["data_ref"])
 
         df_ovos = pd.merge_asof(
@@ -397,6 +274,7 @@ def render_producao(
             direction="backward",
         )
 
+        # Faixa teórica VARIÁVEL: depende de aves_atual (diminui com mortalidade)
         df_ovos["ovos_min_teor"] = df_ovos["aves_atual"] * 0.85
         df_ovos["ovos_max_teor"] = df_ovos["aves_atual"] * 0.95
     else:
@@ -406,7 +284,8 @@ def render_producao(
         df_ovos["ovos_max_teor"] = np.nan
 
     # =============================================================================
-    # ESCALA Y GLOBAL (±20%) — considera também a faixa teórica
+    # ESCALA Y GLOBAL (±20%) — AGORA CONSIDERA TAMBÉM A FAIXA TEÓRICA
+    # (isso evita a faixa ficar "cortada" se ovos_max_teor > ovos_granja observado)
     # =============================================================================
     max_prod = _safe_num_max(
         [
@@ -434,11 +313,7 @@ def render_producao(
     # 5) GRÁFICO 1: ovos_granja x tempo + FAIXA TEÓRICA 85–95% (dinâmica e verde)
     # =============================================================================
     x_axis_ovos, x_scale_ovos = _build_x_axis_and_time_scale_like_temperatura(
-        df_ovos,
-        "data",
-        title="Dia",
-        janela_dias=JANELA_INICIAL_DIAS,
-        end_dt_override=end_dt_override,
+        df_ovos, "data", title="Dia", janela_dias=JANELA_INICIAL_DIAS
     )
 
     base_ovos = alt.Chart(df_ovos).encode(
@@ -447,6 +322,7 @@ def render_producao(
 
     camadas_ovos = []
 
+    # faixa teórica (quando existe) — varia com aves_atual
     if df_ovos["ovos_min_teor"].notna().any() and df_ovos["ovos_max_teor"].notna().any():
         faixa_ovos = base_ovos.mark_area(opacity=0.18, color="#2ecc71").encode(
             y=alt.Y("ovos_min_teor:Q", title="Ovos/dia (granja)", scale=y_scale_global),
@@ -478,7 +354,7 @@ def render_producao(
     camadas_ovos.append(textos_ovos)
 
     chart_ovos_granja = alt.layer(*camadas_ovos).properties(
-        height=ALTURA_GRAFICOS,
+        height=250,
         title="Produção diária de ovos na granja (faixa teórica 85–95% de postura)",
     )
 
@@ -501,11 +377,7 @@ def render_producao(
         )
 
         x_axis_2, x_scale_2 = _build_x_axis_and_time_scale_like_temperatura(
-            df_long,
-            "data",
-            title="Dia",
-            janela_dias=JANELA_INICIAL_DIAS,
-            end_dt_override=end_dt_override,
+            df_long, "data", title="Dia", janela_dias=JANELA_INICIAL_DIAS
         )
 
         color_def = alt.Color(
@@ -563,7 +435,7 @@ def render_producao(
 
         st.markdown("### Produção diária de ovos (granja vs. escola)")
         st.altair_chart(
-            (chart_prod + pontos_prod).properties(height=ALTURA_GRAFICOS).interactive(bind_y=False),
+            (chart_prod + pontos_prod).properties(height=300).interactive(bind_y=False),
             use_container_width=True,
         )
 
@@ -575,11 +447,7 @@ def render_producao(
     if not df_perdas.empty:
         df_perdas = df_perdas.sort_values("data").copy()
         x_axis_3, x_scale_3 = _build_x_axis_and_time_scale_like_temperatura(
-            df_perdas,
-            "data",
-            title="Dia",
-            janela_dias=JANELA_INICIAL_DIAS,
-            end_dt_override=end_dt_override,
+            df_perdas, "data", title="Dia", janela_dias=JANELA_INICIAL_DIAS
         )
 
         max_perdas = pd.to_numeric(df_perdas["perda_ovos"], errors="coerce").max()
@@ -611,7 +479,7 @@ def render_producao(
             text=alt.Text("perda_ovos:Q", format=".0f"),
         )
 
-        chart_perdas = (barras + rotulos).properties(height=ALTURA_GRAFICOS).interactive(bind_y=False)
+        chart_perdas = (barras + rotulos).properties(height=260).interactive(bind_y=False)
 
         st.markdown("### Perdas no trajeto (granja → escola)")
         st.altair_chart(chart_perdas, use_container_width=True)
@@ -648,11 +516,7 @@ def render_producao(
             y_scale_postura = alt.Scale(domain=[y_min_postura, y_max_postura])
 
             x_axis_p, x_scale_p = _build_x_axis_and_time_scale_like_temperatura(
-                df_postura,
-                "data",
-                title="Dia",
-                janela_dias=JANELA_INICIAL_DIAS,
-                end_dt_override=end_dt_override,
+                df_postura, "data", title="Dia", janela_dias=JANELA_INICIAL_DIAS
             )
 
             base_postura = alt.Chart(df_postura).encode(
@@ -695,7 +559,7 @@ def render_producao(
             camadas_postura.append(textos_postura)
 
             chart_postura = alt.layer(*camadas_postura).properties(
-                height=ALTURA_GRAFICOS,
+                height=260,
                 title="Taxa de postura diária (%) — referência teórica 85–95%",
             )
 
