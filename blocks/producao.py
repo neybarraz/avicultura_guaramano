@@ -15,8 +15,8 @@ import altair as alt
 # =============================================================================
 # CONFIG LOCAL — mantém este block autocontido (sem depender de escala global)
 # =============================================================================
-JANELA_INICIAL_DIAS: int = 5   # exibir apenas 5 dias
-PASSO_NAVEGACAO_DIAS: int = 5  # andar 5 dias por clique
+JANELA_INICIAL_DIAS: int = 7   # exibir 7 dias
+PASSO_NAVEGACAO_DIAS: int = 7  # andar 7 dias por clique
 
 
 # =============================================================================
@@ -84,7 +84,7 @@ def _clamp(v: int, lo: int, hi: int) -> int:
 def _get_nav_offset_days(state_key: str) -> int:
     k = f"{state_key}__offset_days"
     if k not in st.session_state:
-        st.session_state[k] = 0  # 0 = termina no end_base (normalmente hoje)
+        st.session_state[k] = 0
     return int(st.session_state[k])
 
 
@@ -99,12 +99,6 @@ def _compute_offset_bounds(
     window_days: int,
     base_end_dt: pd.Timestamp,
 ) -> tuple[int, int]:
-    """
-    Retorna (min_offset_days, max_offset_days).
-    Regra:
-      - max_offset_days = 0 (não avançar além do "hoje"/fim base)
-      - min_offset_days = negativo o suficiente para a janela alcançar o min_dt
-    """
     if df.empty or date_col not in df.columns:
         return (0, 0)
 
@@ -113,10 +107,9 @@ def _compute_offset_bounds(
         return (0, 0)
 
     min_dt = dates.min().normalize()
-    # start_dt = end_dt - (window_days - 1)  => end_dt_min = min_dt + (window_days - 1)
     end_dt_min = min_dt + pd.Timedelta(days=max(0, window_days - 1))
 
-    min_offset = int((end_dt_min - base_end_dt).days)  # geralmente negativo
+    min_offset = int((end_dt_min - base_end_dt).days)
     max_offset = 0
 
     if min_offset > 0:
@@ -134,12 +127,6 @@ def _build_x_axis_and_time_scale_navegavel(
     passo_dias: int = PASSO_NAVEGACAO_DIAS,
     state_key: str,
 ) -> Tuple[alt.Axis, alt.Scale]:
-    """
-    Eixo X com navegação por botões (janela fixa de `janela_dias`).
-    - end_base = max(hoje, max_dt_dados)
-    - offset (em dias) controlado por st.session_state[state_key]
-    - domain = [start_dt, end_dt] onde start_dt = end_dt - (janela_dias - 1)
-    """
     axis = _make_x_axis_dia_pt(title)
     today = pd.Timestamp.today().normalize()
 
@@ -147,10 +134,7 @@ def _build_x_axis_and_time_scale_navegavel(
         return axis, alt.Scale(domain=[today, today])
 
     dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
-    if dates.empty:
-        end_base = today
-    else:
-        end_base = max(today, dates.max().normalize())
+    end_base = max(today, dates.max().normalize()) if not dates.empty else today
 
     min_off, max_off = _compute_offset_bounds(df, date_col, window_days=janela_dias, base_end_dt=end_base)
 
@@ -164,18 +148,7 @@ def _build_x_axis_and_time_scale_navegavel(
     return axis, alt.Scale(domain=[start_dt, end_dt])
 
 
-# =============================================================================
-# INTERAÇÃO: zoom/pan no eixo X (pinça no celular)
-# =============================================================================
 def _enable_pinch_zoom_x(chart: alt.Chart) -> alt.Chart:
-    """
-    Habilita zoom/pan no eixo X via "bind=scales".
-    No mobile, isso permite usar gesto de pinça e arraste.
-
-    Compatível com Altair 4 e 5:
-    - Altair 5: add_params
-    - Altair 4: add_selection
-    """
     zoom_x = alt.selection_interval(bind="scales", encodings=["x"])
     add_params = getattr(chart, "add_params", None)
     if callable(add_params):
@@ -191,20 +164,11 @@ def _render_chart_com_navegacao_lateral(
     date_col: str,
     janela_dias: int = JANELA_INICIAL_DIAS,
     passo_dias: int = PASSO_NAVEGACAO_DIAS,
-    limitar_largura_px: int | None = 720,  # coloque None se não quiser limitar
+    limitar_largura_px: int | None = 720,
 ):
-    """
-    Barra de navegação acima do gráfico:
-      [◀]   intervalo atual   [▶]
-
-    Ajustes:
-    - Botões estreitos (não ocupam a largura toda).
-    - Opcional: limita a largura do bloco para ficar parecido no PC e no celular.
-    - Zoom/pan no eixo X habilitado (pinça no celular).
-    """
     today = pd.Timestamp.today().normalize()
 
-    # (Opcional) limita a largura do bloco (fica "mobile-like" no desktop)
+    # CSS: limita largura do bloco + botões pequenos + data SEM QUEBRAR LINHA
     if limitar_largura_px is not None:
         st.markdown(
             f"""
@@ -217,6 +181,16 @@ def _render_chart_com_navegacao_lateral(
               .producao-nav-wrap div.stButton > button {{
                 padding: 0.25rem 0.6rem;
                 min-width: 2.6rem;
+              }}
+              .producao-nav-date {{
+                white-space: nowrap;          /* não quebra linha */
+                overflow: hidden;             /* corta o excesso */
+                text-overflow: ellipsis;      /* "..." se faltar espaço */
+                width: 12.5rem;               /* largura fixa do texto da data */
+                margin: 0 auto;               /* centraliza */
+                text-align: center;
+                opacity: 0.85;
+                font-size: 0.9rem;
               }}
             </style>
             """,
@@ -242,7 +216,6 @@ def _render_chart_com_navegacao_lateral(
     off = _clamp(off, min_off, max_off)
     _set_nav_offset_days(state_key, off)
 
-    # Intervalo visível atual (para exibir no caption)
     end_dt = end_base + pd.Timedelta(days=off)
     start_dt = end_dt - pd.Timedelta(days=max(0, janela_dias - 1))
 
@@ -263,11 +236,9 @@ def _render_chart_com_navegacao_lateral(
             .replace("Dec", "DEZ")
         )
 
-    # Wrapper (para aplicar max-width apenas nesta seção)
     if limitar_largura_px is not None:
         st.markdown("<div class='producao-nav-wrap'>", unsafe_allow_html=True)
 
-    # Barra de navegação
     c1, c2, c3 = st.columns([1, 10, 1], vertical_alignment="center")
 
     with c1:
@@ -279,9 +250,7 @@ def _render_chart_com_navegacao_lateral(
 
     with c2:
         st.markdown(
-            f"<div style='text-align:center; opacity:0.8; font-size:0.9rem;'>"
-            f"{_fmt_pt(start_dt)} — {_fmt_pt(end_dt)}"
-            f"</div>",
+            f"<div class='producao-nav-date'>{_fmt_pt(start_dt)} — {_fmt_pt(end_dt)}</div>",
             unsafe_allow_html=True,
         )
 
@@ -300,7 +269,6 @@ def _render_chart_com_navegacao_lateral(
         _set_nav_offset_days(state_key, _clamp(off + passo_dias, min_off, max_off))
         st.rerun()
 
-    # Gráfico: pinch-zoom/pan no eixo X
     st.altair_chart(_enable_pinch_zoom_x(chart), use_container_width=True)
 
     if limitar_largura_px is not None:
@@ -312,18 +280,9 @@ def render_producao(
     PASTA_DADOS: str,
     ini,
     fim,
-    _build_x_axis_and_scale: Callable,  # mantido por compatibilidade (não usado aqui)
-    chart_serie_altair: Callable,       # mantido por compatibilidade (não usado aqui)
+    _build_x_axis_and_scale: Callable,
+    chart_serie_altair: Callable,
 ):
-    """
-    Renderiza a SEÇÃO: PRODUÇÃO E PERDAS (USANDO producao_ovos.csv)
-
-    Observação:
-    - Este block controla o eixo X localmente e agora tem navegação por botões (◀ ▶),
-      exibindo somente 5 dias por vez e movendo 5 dias por clique.
-    - No celular: é possível usar pinça para zoom no eixo X (além dos botões).
-    """
-
     st.markdown("<div id='producao' style='position: relative; top: -40px;'></div>", unsafe_allow_html=True)
 
     # =============================================================================
@@ -558,8 +517,6 @@ def render_producao(
         state_key="producao__ovos_granja_x",
         df_ref=df_ovos,
         date_col="data",
-        janela_dias=JANELA_INICIAL_DIAS,
-        passo_dias=PASSO_NAVEGACAO_DIAS,
     )
 
     # =============================================================================
@@ -645,8 +602,6 @@ def render_producao(
             state_key="producao__granja_vs_escola_x",
             df_ref=df_long,
             date_col="data",
-            janela_dias=JANELA_INICIAL_DIAS,
-            passo_dias=PASSO_NAVEGACAO_DIAS,
         )
 
     # =============================================================================
@@ -703,8 +658,6 @@ def render_producao(
             state_key="producao__perdas_x",
             df_ref=df_perdas,
             date_col="data",
-            janela_dias=JANELA_INICIAL_DIAS,
-            passo_dias=PASSO_NAVEGACAO_DIAS,
         )
 
     # =============================================================================
@@ -796,8 +749,6 @@ def render_producao(
                 state_key="producao__postura_x",
                 df_ref=df_postura,
                 date_col="data",
-                janela_dias=JANELA_INICIAL_DIAS,
-                passo_dias=PASSO_NAVEGACAO_DIAS,
             )
 
     # =============================================================================
