@@ -16,8 +16,8 @@ import altair as alt
 # CONFIG LOCAL — mantém este block autocontido (sem depender de escala global)
 # =============================================================================
 JANELA_DESKTOP_DIAS: int = 7
-JANELA_MOBILE_DIAS: int = 3
-PASSO_MOBILE_DIAS: int = 3  # no celular, ao navegar, avança/volta de 3 em 3
+JANELA_MOBILE_DIAS: int = 7
+PASSO_MOBILE_DIAS: int = 7  # no celular, ao navegar, avança/volta de 3 em 3
 
 
 # =============================================================================
@@ -206,6 +206,7 @@ def render_producao(
     st.markdown("<div id='producao' style='position: relative; top: -40px;'></div>", unsafe_allow_html=True)
 
     is_mobile = _is_mobile_client()
+    st.caption(f"[debug] is_mobile={is_mobile} offset={st.session_state.get('producao_offset_days', None)}")
     janela_dias = JANELA_MOBILE_DIAS if is_mobile else JANELA_DESKTOP_DIAS
 
     # Em mobile, reduzir peso do Vega (muito importante quando “não aparece”)
@@ -753,3 +754,4 @@ def render_producao(
         - registro diário em planilhas para rastrear dias mais críticos.
         """
     )
+
