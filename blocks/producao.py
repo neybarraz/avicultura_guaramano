@@ -174,29 +174,78 @@ def _render_chart_com_navegacao_lateral(
     passo_dias: int = PASSO_NAVEGACAO_DIAS,
 ):
     """
-    Renderiza botões ◀ ▶ nas laterais do gráfico; cada clique move a janela em blocos de `passo_dias`.
-    Os limites são calculados a partir de df_ref/date_col.
+    Renderiza botões ◀ ▶ de navegação do eixo X.
+
+    Implementação MOBILE-FRIENDLY:
+    - Em vez de botões "nas laterais" do gráfico (que quebram no celular),
+      ele coloca uma barra de navegação ACIMA do gráfico:
+        [◀]   (intervalo atual)   [▶]
+    - Cada clique move a janela em blocos de `passo_dias`.
     """
     today = pd.Timestamp.today().normalize()
+
+    # Base do fim do eixo X (max entre hoje e último dado)
     if df_ref.empty or date_col not in df_ref.columns:
         end_base = today
         min_off, max_off = (0, 0)
     else:
         dates = pd.to_datetime(df_ref[date_col], errors="coerce").dropna()
         end_base = max(today, dates.max().normalize()) if not dates.empty else today
-        min_off, max_off = _compute_offset_bounds(df_ref, date_col, window_days=janela_dias, base_end_dt=end_base)
+        min_off, max_off = _compute_offset_bounds(
+            df_ref,
+            date_col,
+            window_days=janela_dias,
+            base_end_dt=end_base,
+        )
 
+    # Offset atual (limitado)
     off = _get_nav_offset_days(state_key)
     off = _clamp(off, min_off, max_off)
     _set_nav_offset_days(state_key, off)
 
-    col_left, col_mid, col_right = st.columns([1, 18, 1], vertical_alignment="center")
+    # Intervalo visível atual (para exibir no caption)
+    end_dt = end_base + pd.Timedelta(days=off)
+    start_dt = end_dt - pd.Timedelta(days=max(0, janela_dias - 1))
 
-    with col_left:
-        clicked_left = st.button("◀", key=f"{state_key}__btn_left", help=f"Voltar {passo_dias} dias")
+    # Formatação PT simples para o caption (não depende do Altair)
+    def _fmt_pt(dt: pd.Timestamp) -> str:
+        s = dt.strftime("%d/%b")
+        return (
+            s.replace("Jan", "JAN")
+            .replace("Feb", "FEV")
+            .replace("Mar", "MAR")
+            .replace("Apr", "ABR")
+            .replace("May", "MAI")
+            .replace("Jun", "JUN")
+            .replace("Jul", "JUL")
+            .replace("Aug", "AGO")
+            .replace("Sep", "SET")
+            .replace("Oct", "OUT")
+            .replace("Nov", "NOV")
+            .replace("Dec", "DEZ")
+        )
 
-    with col_right:
-        clicked_right = st.button("▶", key=f"{state_key}__btn_right", help=f"Avançar {passo_dias} dias")
+    # Barra de navegação no topo (responsivo no celular)
+    c1, c2, c3 = st.columns([1, 6, 1], vertical_alignment="center")
+
+    with c1:
+        clicked_left = st.button(
+            "◀",
+            key=f"{state_key}__btn_left",
+            help=f"Voltar {passo_dias} dias",
+            use_container_width=True,
+        )
+
+    with c2:
+        st.caption(f"{_fmt_pt(start_dt)} — {_fmt_pt(end_dt)}")
+
+    with c3:
+        clicked_right = st.button(
+            "▶",
+            key=f"{state_key}__btn_right",
+            help=f"Avançar {passo_dias} dias",
+            use_container_width=True,
+        )
 
     if clicked_left:
         _set_nav_offset_days(state_key, _clamp(off - passo_dias, min_off, max_off))
@@ -206,8 +255,9 @@ def _render_chart_com_navegacao_lateral(
         _set_nav_offset_days(state_key, _clamp(off + passo_dias, min_off, max_off))
         st.rerun()
 
-    with col_mid:
-        st.altair_chart(chart.interactive(bind_y=False), use_container_width=True)
+    # Gráfico
+    st.altair_chart(chart.interactive(bind_y=False), use_container_width=True)
+
 
 
 def render_producao(
