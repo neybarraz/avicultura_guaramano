@@ -354,7 +354,7 @@ def render_producao(
     camadas_ovos.append(textos_ovos)
 
     chart_ovos_granja = alt.layer(*camadas_ovos).properties(
-        height=250,
+        height=380,
         title="Produção diária de ovos na granja (faixa teórica 85–95% de postura)",
     )
 
@@ -586,3 +586,4 @@ def render_producao(
         - registro diário em planilhas para rastrear dias mais críticos.
         """
     )
+
