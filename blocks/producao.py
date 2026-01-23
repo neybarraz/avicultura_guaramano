@@ -16,8 +16,8 @@ import altair as alt
 # CONFIG LOCAL — mantém este block autocontido (sem depender de escala global)
 # =============================================================================
 JANELA_DESKTOP_DIAS: int = 7
-JANELA_MOBILE_DIAS: int = 7
-PASSO_MOBILE_DIAS: int = 7  # no celular, ao navegar, avança/volta de 3 em 3
+JANELA_MOBILE_DIAS: int = 3
+PASSO_MOBILE_DIAS: int = 3  # no celular, ao navegar, avança/volta de 3 em 3
 
 
 # =============================================================================
@@ -109,6 +109,7 @@ def _build_x_axis_and_time_scale_like_temperatura(
       - end_dt = end_dt_override se fornecido senão end_dt_default
       - start_dt = max(min_dt, end_dt - janela)
       - domain = [start_dt, end_dt]
+      - axis %d/%b + meses PT via labelExpr
     """
     axis = _make_x_axis_dia_pt(title)
     today = pd.Timestamp.today().normalize()
@@ -125,6 +126,7 @@ def _build_x_axis_and_time_scale_like_temperatura(
 
     min_dt = dates.min()
     max_dt = dates.max()
+
     max_dt_norm = max_dt.normalize() if hasattr(max_dt, "normalize") else max_dt
     end_dt_default = max(today, max_dt_norm)
 
@@ -200,23 +202,22 @@ def render_producao(
     Mobile:
       - janela X = 3 dias
       - navegação discreta (±3 dias) por botões (evita pan/drag)
-      - simplifica camadas (remove mark_text) para evitar "gráfico em branco"
+      - clamp do offset para não “sumir” com o gráfico
+      - simplifica o spec (remove mark_text e tooltip) para evitar gráfico em branco
     """
 
     st.markdown("<div id='producao' style='position: relative; top: -40px;'></div>", unsafe_allow_html=True)
 
     is_mobile = _is_mobile_client()
-    st.caption(f"[debug] is_mobile={is_mobile} offset={st.session_state.get('producao_offset_days', None)}")
-    janela_dias = JANELA_MOBILE_DIAS if is_mobile else JANELA_DESKTOP_DIAS
 
-    # Em mobile, reduzir peso do Vega (muito importante quando “não aparece”)
+    # Em mobile, reduzir peso do Vega/Altair (evita “área em branco”)
     MOBILE_REMOVER_TEXTOS = True
-    MOBILE_REMOVER_TOOLTIP = False  # se ainda ficar branco, troque para True
+    MOBILE_REMOVER_TOOLTIP = True  # importante: no seu caso isso tende a resolver o “não aparece”
 
     # Estado da navegação em mobile
     state_key = "producao_offset_days"
     if state_key not in st.session_state:
-        st.session_state[state_key] = 0  # 0 = janela termina no (hoje ou max_dt)
+        st.session_state[state_key] = 0  # 0 = janela termina em (hoje ou max_dt)
 
     # =============================================================================
     # 1) LEITURA DO CSV PRINCIPAL
@@ -391,15 +392,22 @@ def render_producao(
     y_scale_global = alt.Scale(domain=[y_min_global, y_max_global])
 
     # =============================================================================
-    # X domain: desktop padrão | mobile paginado (±3 dias)
+    # X domain: desktop padrão | mobile paginado (±3 dias), com CLAMP do offset
     # =============================================================================
     end_dt_default = _compute_end_dt_default(df_ovos, "data")
     min_dt_ovos = _compute_min_dt(df_ovos, "data")
 
     if is_mobile:
-        # garante offset sempre múltiplo de 3
+        # clamp do offset (múltiplo de 3) para não cair fora do dataset
+        max_offset_days = max(0, int((end_dt_default - min_dt_ovos).days))
+        max_offset_days = (max_offset_days // PASSO_MOBILE_DIAS) * PASSO_MOBILE_DIAS
+
         offset_days = int(st.session_state[state_key])
-        offset_days = max(0, (offset_days // PASSO_MOBILE_DIAS) * PASSO_MOBILE_DIAS)
+        offset_days = (max(0, offset_days) // PASSO_MOBILE_DIAS) * PASSO_MOBILE_DIAS
+
+        if offset_days > max_offset_days:
+            offset_days = 0
+
         st.session_state[state_key] = offset_days
 
         end_dt_override = end_dt_default - pd.Timedelta(days=offset_days)
@@ -407,11 +415,18 @@ def render_producao(
             end_dt_override = min_dt_ovos
 
         x_axis_ovos, x_scale_ovos = _build_x_axis_and_time_scale_like_temperatura(
-            df_ovos, "data", title="Dia", janela_dias=JANELA_MOBILE_DIAS, end_dt_override=end_dt_override
+            df_ovos,
+            "data",
+            title="Dia",
+            janela_dias=JANELA_MOBILE_DIAS,
+            end_dt_override=end_dt_override,
         )
     else:
         x_axis_ovos, x_scale_ovos = _build_x_axis_and_time_scale_like_temperatura(
-            df_ovos, "data", title="Dia", janela_dias=JANELA_DESKTOP_DIAS
+            df_ovos,
+            "data",
+            title="Dia",
+            janela_dias=JANELA_DESKTOP_DIAS,
         )
 
     # =============================================================================
@@ -449,7 +464,6 @@ def render_producao(
     )
     camadas_ovos.append(pontos_ovos)
 
-    # TEXTOS: no mobile, isso costuma ser o maior causador de “gráfico em branco”
     if not (is_mobile and MOBILE_REMOVER_TEXTOS):
         textos_ovos = base_ovos.mark_text(dy=-20, fontSize=10, color="white").encode(
             y=alt.Y("ovos_granja:Q", scale=y_scale_global),
@@ -476,7 +490,6 @@ def render_producao(
             if st.button("3 dias ▶", key="prod_next_3d", use_container_width=True):
                 st.session_state[state_key] = max(0, int(st.session_state[state_key]) - PASSO_MOBILE_DIAS)
 
-        # Sem interactive no mobile (evita pan/drag lento e travamentos)
         st.altair_chart(chart_ovos_granja, use_container_width=True)
     else:
         st.altair_chart(chart_ovos_granja.interactive(bind_y=False), use_container_width=True)
@@ -504,11 +517,18 @@ def render_producao(
                 end_dt_override_2 = min_dt_2
 
             x_axis_2, x_scale_2 = _build_x_axis_and_time_scale_like_temperatura(
-                df_long, "data", title="Dia", janela_dias=JANELA_MOBILE_DIAS, end_dt_override=end_dt_override_2
+                df_long,
+                "data",
+                title="Dia",
+                janela_dias=JANELA_MOBILE_DIAS,
+                end_dt_override=end_dt_override_2,
             )
         else:
             x_axis_2, x_scale_2 = _build_x_axis_and_time_scale_like_temperatura(
-                df_long, "data", title="Dia", janela_dias=JANELA_DESKTOP_DIAS
+                df_long,
+                "data",
+                title="Dia",
+                janela_dias=JANELA_DESKTOP_DIAS,
             )
 
         color_def = alt.Color(
@@ -586,11 +606,18 @@ def render_producao(
                 end_dt_override_3 = min_dt_3
 
             x_axis_3, x_scale_3 = _build_x_axis_and_time_scale_like_temperatura(
-                df_perdas, "data", title="Dia", janela_dias=JANELA_MOBILE_DIAS, end_dt_override=end_dt_override_3
+                df_perdas,
+                "data",
+                title="Dia",
+                janela_dias=JANELA_MOBILE_DIAS,
+                end_dt_override=end_dt_override_3,
             )
         else:
             x_axis_3, x_scale_3 = _build_x_axis_and_time_scale_like_temperatura(
-                df_perdas, "data", title="Dia", janela_dias=JANELA_DESKTOP_DIAS
+                df_perdas,
+                "data",
+                title="Dia",
+                janela_dias=JANELA_DESKTOP_DIAS,
             )
 
         max_perdas = pd.to_numeric(df_perdas["perda_ovos"], errors="coerce").max()
@@ -619,7 +646,6 @@ def render_producao(
             y=alt.Y("perda_ovos:Q", title="Perdas (ovos)", scale=y_scale_perdas),
         )
 
-        # no mobile: remove rótulos por padrão
         if is_mobile and MOBILE_REMOVER_TEXTOS:
             chart_perdas = barras.properties(height=260)
         else:
@@ -674,11 +700,18 @@ def render_producao(
                     end_dt_override_p = min_dt_p
 
                 x_axis_p, x_scale_p = _build_x_axis_and_time_scale_like_temperatura(
-                    df_postura, "data", title="Dia", janela_dias=JANELA_MOBILE_DIAS, end_dt_override=end_dt_override_p
+                    df_postura,
+                    "data",
+                    title="Dia",
+                    janela_dias=JANELA_MOBILE_DIAS,
+                    end_dt_override=end_dt_override_p,
                 )
             else:
                 x_axis_p, x_scale_p = _build_x_axis_and_time_scale_like_temperatura(
-                    df_postura, "data", title="Dia", janela_dias=JANELA_DESKTOP_DIAS
+                    df_postura,
+                    "data",
+                    title="Dia",
+                    janela_dias=JANELA_DESKTOP_DIAS,
                 )
 
             base_postura = alt.Chart(df_postura).encode(
@@ -754,4 +787,3 @@ def render_producao(
         - registro diário em planilhas para rastrear dias mais críticos.
         """
     )
-
