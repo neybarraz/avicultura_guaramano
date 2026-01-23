@@ -164,6 +164,25 @@ def _build_x_axis_and_time_scale_navegavel(
     return axis, alt.Scale(domain=[start_dt, end_dt])
 
 
+# =============================================================================
+# INTERAÇÃO: zoom/pan no eixo X (pinça no celular)
+# =============================================================================
+def _enable_pinch_zoom_x(chart: alt.Chart) -> alt.Chart:
+    """
+    Habilita zoom/pan no eixo X via "bind=scales".
+    No mobile, isso permite usar gesto de pinça e arraste.
+
+    Compatível com Altair 4 e 5:
+    - Altair 5: add_params
+    - Altair 4: add_selection
+    """
+    zoom_x = alt.selection_interval(bind="scales", encodings=["x"])
+    add_params = getattr(chart, "add_params", None)
+    if callable(add_params):
+        return chart.add_params(zoom_x)
+    return chart.add_selection(zoom_x)
+
+
 def _render_chart_com_navegacao_lateral(
     chart: alt.Chart,
     *,
@@ -179,8 +198,9 @@ def _render_chart_com_navegacao_lateral(
       [◀]   intervalo atual   [▶]
 
     Ajustes:
-    - Botões ficam estreitos (sem use_container_width).
-    - Opcional: limita largura do bloco para ficar parecido no PC e no celular.
+    - Botões estreitos (não ocupam a largura toda).
+    - Opcional: limita a largura do bloco para ficar parecido no PC e no celular.
+    - Zoom/pan no eixo X habilitado (pinça no celular).
     """
     today = pd.Timestamp.today().normalize()
 
@@ -194,7 +214,6 @@ def _render_chart_com_navegacao_lateral(
                 margin-left: auto;
                 margin-right: auto;
               }}
-              /* deixa os botões menores (apenas nesta área) */
               .producao-nav-wrap div.stButton > button {{
                 padding: 0.25rem 0.6rem;
                 min-width: 2.6rem;
@@ -281,13 +300,11 @@ def _render_chart_com_navegacao_lateral(
         _set_nav_offset_days(state_key, _clamp(off + passo_dias, min_off, max_off))
         st.rerun()
 
-    # Gráfico
-    st.altair_chart(chart.interactive(bind_y=False), use_container_width=True)
+    # Gráfico: pinch-zoom/pan no eixo X
+    st.altair_chart(_enable_pinch_zoom_x(chart), use_container_width=True)
 
     if limitar_largura_px is not None:
         st.markdown("</div>", unsafe_allow_html=True)
-
-
 
 
 def render_producao(
@@ -304,6 +321,7 @@ def render_producao(
     Observação:
     - Este block controla o eixo X localmente e agora tem navegação por botões (◀ ▶),
       exibindo somente 5 dias por vez e movendo 5 dias por clique.
+    - No celular: é possível usar pinça para zoom no eixo X (além dos botões).
     """
 
     st.markdown("<div id='producao' style='position: relative; top: -40px;'></div>", unsafe_allow_html=True)
