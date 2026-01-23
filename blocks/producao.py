@@ -17,7 +17,7 @@ import altair as alt
 # =============================================================================
 JANELA_DESKTOP_DIAS: int = 7
 JANELA_MOBILE_DIAS: int = 3
-PASSO_MOBILE_DIAS: int = 3  # no celular, ao “mexer” avança/volta de 3 em 3
+PASSO_MOBILE_DIAS: int = 3  # no celular, ao navegar, avança/volta de 3 em 3
 
 
 # =============================================================================
@@ -25,8 +25,8 @@ PASSO_MOBILE_DIAS: int = 3  # no celular, ao “mexer” avança/volta de 3 em 3
 # =============================================================================
 def _is_mobile_client() -> bool:
     """
-    Detecção automática (best-effort) baseada em headers do Streamlit.
-    Se não houver headers disponíveis na versão instalada, assume desktop.
+    Detecção automática (best-effort) baseada em headers.
+    Se a versão do Streamlit não expor headers, assume desktop.
     """
     try:
         ctx = getattr(st, "context", None)
@@ -37,7 +37,6 @@ def _is_mobile_client() -> bool:
         if not headers:
             return False
 
-        # Alguns navegadores expõem client hints:
         sec_mobile = headers.get("sec-ch-ua-mobile") or headers.get("Sec-CH-UA-Mobile")
         if isinstance(sec_mobile, str) and sec_mobile.strip() == "?1":
             return True
@@ -45,7 +44,6 @@ def _is_mobile_client() -> bool:
         ua = headers.get("user-agent") or headers.get("User-Agent") or ""
         ua_l = ua.lower()
 
-        # Heurística típica
         mobile_tokens = [
             "android",
             "iphone",
@@ -102,16 +100,15 @@ def _build_x_axis_and_time_scale_like_temperatura(
     date_col: str,
     *,
     title: str = "Dia",
-    janela_dias: int = JANELA_DESKTOP_DIAS,
+    janela_dias: int,
     end_dt_override: Optional[pd.Timestamp] = None,
 ) -> Tuple[alt.Axis, alt.Scale]:
     """
-    Eixo X igual aos outros blocos:
+    Eixo X:
       - end_dt_default = max(hoje, max_dt_dados)
-      - end_dt = end_dt_override (se fornecido) senão end_dt_default
+      - end_dt = end_dt_override se fornecido senão end_dt_default
       - start_dt = max(min_dt, end_dt - janela)
       - domain = [start_dt, end_dt]
-      - axis %d/%b + meses PT via labelExpr
     """
     axis = _make_x_axis_dia_pt(title)
     today = pd.Timestamp.today().normalize()
@@ -128,7 +125,6 @@ def _build_x_axis_and_time_scale_like_temperatura(
 
     min_dt = dates.min()
     max_dt = dates.max()
-
     max_dt_norm = max_dt.normalize() if hasattr(max_dt, "normalize") else max_dt
     end_dt_default = max(today, max_dt_norm)
 
@@ -142,28 +138,6 @@ def _build_x_axis_and_time_scale_like_temperatura(
 
     start_dt = max(min_dt, end_dt - pd.Timedelta(days=janela_dias))
     return axis, alt.Scale(domain=[start_dt, end_dt])
-
-
-def _compute_end_dt_default(df: pd.DataFrame, date_col: str) -> pd.Timestamp:
-    today = pd.Timestamp.today().normalize()
-    if df.empty or date_col not in df.columns:
-        return today
-    dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
-    if dates.empty:
-        return today
-    max_dt = dates.max()
-    max_dt_norm = max_dt.normalize() if hasattr(max_dt, "normalize") else max_dt
-    return max(today, max_dt_norm)
-
-
-def _compute_min_dt(df: pd.DataFrame, date_col: str) -> pd.Timestamp:
-    today = pd.Timestamp.today().normalize()
-    if df.empty or date_col not in df.columns:
-        return today
-    dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
-    if dates.empty:
-        return today
-    return dates.min()
 
 
 def _safe_num_max(series_list) -> float:
@@ -188,6 +162,28 @@ def _safe_num_min(series_list) -> float:
     return float(min(vals)) if vals else 0.0
 
 
+def _compute_end_dt_default(df: pd.DataFrame, date_col: str) -> pd.Timestamp:
+    today = pd.Timestamp.today().normalize()
+    if df.empty or date_col not in df.columns:
+        return today
+    dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
+    if dates.empty:
+        return today
+    max_dt = dates.max()
+    max_dt_norm = max_dt.normalize() if hasattr(max_dt, "normalize") else max_dt
+    return max(today, max_dt_norm)
+
+
+def _compute_min_dt(df: pd.DataFrame, date_col: str) -> pd.Timestamp:
+    today = pd.Timestamp.today().normalize()
+    if df.empty or date_col not in df.columns:
+        return today
+    dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
+    if dates.empty:
+        return today
+    return dates.min()
+
+
 def render_producao(
     *,
     PASTA_DADOS: str,
@@ -197,20 +193,29 @@ def render_producao(
     chart_serie_altair: Callable,       # mantido por compatibilidade (não usado aqui)
 ):
     """
-    Renderiza a SEÇÃO: PRODUÇÃO E PERDAS (USANDO producao_ovos.csv)
+    Desktop:
+      - janela X = 7 dias
+      - mantém .interactive(bind_y=False) como estava
 
-    Ajuste solicitado:
-    - Detecta automaticamente celular vs computador.
-    - Desktop: mantém janela do eixo X em 7 dias e mantém .interactive(bind_y=False).
-    - Celular: usa janela do eixo X em 3 dias e navegação por “páginas” de 3 dias
-      (sem pan/drag horizontal, porque isso fica lento no mobile).
+    Mobile:
+      - janela X = 3 dias
+      - navegação discreta (±3 dias) por botões (evita pan/drag)
+      - simplifica camadas (remove mark_text) para evitar "gráfico em branco"
     """
 
     st.markdown("<div id='producao' style='position: relative; top: -40px;'></div>", unsafe_allow_html=True)
 
     is_mobile = _is_mobile_client()
     janela_dias = JANELA_MOBILE_DIAS if is_mobile else JANELA_DESKTOP_DIAS
-    aplicar_interacao = not is_mobile
+
+    # Em mobile, reduzir peso do Vega (muito importante quando “não aparece”)
+    MOBILE_REMOVER_TEXTOS = True
+    MOBILE_REMOVER_TOOLTIP = False  # se ainda ficar branco, troque para True
+
+    # Estado da navegação em mobile
+    state_key = "producao_offset_days"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = 0  # 0 = janela termina no (hoje ou max_dt)
 
     # =============================================================================
     # 1) LEITURA DO CSV PRINCIPAL
@@ -331,15 +336,6 @@ def render_producao(
         ).sort_values("data")
 
     # =============================================================================
-    # 4.1) CONTROLE “INTUITIVO” NO CELULAR: botões discretos (±3 dias)
-    # =============================================================================
-    # A ideia é: no celular, não existe arrastar o gráfico (pan) porque trava.
-    # Em vez disso, o usuário usa botões para avançar/voltar a janela em passos de 3 dias.
-    state_key = "producao_offset_days"
-    if state_key not in st.session_state:
-        st.session_state[state_key] = 0  # 0 = janela termina em (hoje ou max_dt)
-
-    # =============================================================================
     # 5) Preparação do dataset do Gráfico 1 (com merge e faixa teórica variável)
     # =============================================================================
     df_ovos = df_producao_filtrado[["data", "ovos_granja"]].copy().sort_values("data")
@@ -394,13 +390,13 @@ def render_producao(
     y_scale_global = alt.Scale(domain=[y_min_global, y_max_global])
 
     # =============================================================================
-    # X domain: desktop padrão | mobile paginado em passos de 3 dias
+    # X domain: desktop padrão | mobile paginado (±3 dias)
     # =============================================================================
     end_dt_default = _compute_end_dt_default(df_ovos, "data")
     min_dt_ovos = _compute_min_dt(df_ovos, "data")
 
     if is_mobile:
-        # offset sempre múltiplo de 3 (PASSO_MOBILE_DIAS)
+        # garante offset sempre múltiplo de 3
         offset_days = int(st.session_state[state_key])
         offset_days = max(0, (offset_days // PASSO_MOBILE_DIAS) * PASSO_MOBILE_DIAS)
         st.session_state[state_key] = offset_days
@@ -410,11 +406,7 @@ def render_producao(
             end_dt_override = min_dt_ovos
 
         x_axis_ovos, x_scale_ovos = _build_x_axis_and_time_scale_like_temperatura(
-            df_ovos,
-            "data",
-            title="Dia",
-            janela_dias=JANELA_MOBILE_DIAS,
-            end_dt_override=end_dt_override,
+            df_ovos, "data", title="Dia", janela_dias=JANELA_MOBILE_DIAS, end_dt_override=end_dt_override
         )
     else:
         x_axis_ovos, x_scale_ovos = _build_x_axis_and_time_scale_like_temperatura(
@@ -442,23 +434,27 @@ def render_producao(
     )
     camadas_ovos.append(linha_ovos)
 
-    pontos_ovos = base_ovos.mark_point(size=60).encode(
+    tooltip_ovos = None if (is_mobile and MOBILE_REMOVER_TOOLTIP) else [
+        alt.Tooltip("data:T", title="Dia"),
+        alt.Tooltip("ovos_granja:Q", title="Ovos (granja)", format=".0f"),
+        alt.Tooltip("aves_atual:Q", title="Aves atuais", format=".0f"),
+        alt.Tooltip("ovos_min_teor:Q", title="Faixa mínima teórica", format=".0f"),
+        alt.Tooltip("ovos_max_teor:Q", title="Faixa máxima teórica", format=".0f"),
+    ]
+
+    pontos_ovos = base_ovos.mark_point(size=50 if is_mobile else 60).encode(
         y=alt.Y("ovos_granja:Q", scale=y_scale_global),
-        tooltip=[
-            alt.Tooltip("data:T", title="Dia"),
-            alt.Tooltip("ovos_granja:Q", title="Ovos (granja)", format=".0f"),
-            alt.Tooltip("aves_atual:Q", title="Aves atuais", format=".0f"),
-            alt.Tooltip("ovos_min_teor:Q", title="Faixa mínima teórica", format=".0f"),
-            alt.Tooltip("ovos_max_teor:Q", title="Faixa máxima teórica", format=".0f"),
-        ],
+        tooltip=tooltip_ovos,
     )
     camadas_ovos.append(pontos_ovos)
 
-    textos_ovos = base_ovos.mark_text(dy=-20, fontSize=10, color="white").encode(
-        y=alt.Y("ovos_granja:Q", scale=y_scale_global),
-        text=alt.Text("ovos_granja:Q", format=".0f"),
-    )
-    camadas_ovos.append(textos_ovos)
+    # TEXTOS: no mobile, isso costuma ser o maior causador de “gráfico em branco”
+    if not (is_mobile and MOBILE_REMOVER_TEXTOS):
+        textos_ovos = base_ovos.mark_text(dy=-20, fontSize=10, color="white").encode(
+            y=alt.Y("ovos_granja:Q", scale=y_scale_global),
+            text=alt.Text("ovos_granja:Q", format=".0f"),
+        )
+        camadas_ovos.append(textos_ovos)
 
     chart_ovos_granja = alt.layer(*camadas_ovos).properties(
         height=250,
@@ -479,6 +475,7 @@ def render_producao(
             if st.button("3 dias ▶", key="prod_next_3d", use_container_width=True):
                 st.session_state[state_key] = max(0, int(st.session_state[state_key]) - PASSO_MOBILE_DIAS)
 
+        # Sem interactive no mobile (evita pan/drag lento e travamentos)
         st.altair_chart(chart_ovos_granja, use_container_width=True)
     else:
         st.altair_chart(chart_ovos_granja.interactive(bind_y=False), use_container_width=True)
@@ -536,6 +533,12 @@ def render_producao(
             ),
         )
 
+        tooltip_prod = None if (is_mobile and MOBILE_REMOVER_TOOLTIP) else [
+            alt.Tooltip("data:T", title="Dia"),
+            alt.Tooltip("origem:N", title="Origem"),
+            alt.Tooltip("ovos:Q", title="Ovos", format=".0f"),
+        ]
+
         chart_prod = (
             alt.Chart(df_long)
             .mark_line()
@@ -543,32 +546,24 @@ def render_producao(
                 x=alt.X("data:T", axis=x_axis_2, scale=x_scale_2),
                 y=alt.Y("ovos:Q", title="Produção de ovos (unid./dia)", scale=y_scale_global),
                 color=color_def,
-                tooltip=[
-                    alt.Tooltip("data:T", title="Dia"),
-                    alt.Tooltip("origem:N", title="Origem"),
-                    alt.Tooltip("ovos:Q", title="Ovos", format=".0f"),
-                ],
+                tooltip=tooltip_prod,
             )
         )
 
         pontos_prod = (
             alt.Chart(df_long)
-            .mark_point(size=50)
+            .mark_point(size=40 if is_mobile else 50)
             .encode(
                 x=alt.X("data:T", axis=x_axis_2, scale=x_scale_2),
                 y=alt.Y("ovos:Q", title="Produção de ovos (unid./dia)", scale=y_scale_global),
                 color=color_def,
-                tooltip=[
-                    alt.Tooltip("data:T", title="Dia"),
-                    alt.Tooltip("origem:N", title="Origem"),
-                    alt.Tooltip("ovos:Q", title="Ovos", format=".0f"),
-                ],
+                tooltip=tooltip_prod,
             )
         )
 
         st.markdown("### Produção diária de ovos (granja vs. escola)")
-
         chart_2 = (chart_prod + pontos_prod).properties(height=300)
+
         if is_mobile:
             st.altair_chart(chart_2, use_container_width=True)
         else:
@@ -609,24 +604,29 @@ def render_producao(
 
         y_scale_perdas = alt.Scale(domain=[y_min_perdas, y_max_perdas])
 
+        tooltip_perdas = None if (is_mobile and MOBILE_REMOVER_TOOLTIP) else [
+            alt.Tooltip("data:T", title="Dia"),
+            alt.Tooltip("perda_ovos:Q", title="Perdas (ovos)", format=".0f"),
+        ]
+
         base_perdas = alt.Chart(df_perdas).encode(
             x=alt.X("data:T", axis=x_axis_3, scale=x_scale_3),
-            tooltip=[
-                alt.Tooltip("data:T", title="Dia"),
-                alt.Tooltip("perda_ovos:Q", title="Perdas (ovos)", format=".0f"),
-            ],
+            tooltip=tooltip_perdas,
         )
 
         barras = base_perdas.mark_bar(color="#d62728").encode(
             y=alt.Y("perda_ovos:Q", title="Perdas (ovos)", scale=y_scale_perdas),
         )
 
-        rotulos = base_perdas.mark_text(dy=-10, fontSize=10, color="white").encode(
-            y=alt.Y("perda_ovos:Q", scale=y_scale_perdas),
-            text=alt.Text("perda_ovos:Q", format=".0f"),
-        )
-
-        chart_perdas = (barras + rotulos).properties(height=260)
+        # no mobile: remove rótulos por padrão
+        if is_mobile and MOBILE_REMOVER_TEXTOS:
+            chart_perdas = barras.properties(height=260)
+        else:
+            rotulos = base_perdas.mark_text(dy=-10, fontSize=10, color="white").encode(
+                y=alt.Y("perda_ovos:Q", scale=y_scale_perdas),
+                text=alt.Text("perda_ovos:Q", format=".0f"),
+            )
+            chart_perdas = (barras + rotulos).properties(height=260)
 
         st.markdown("### Perdas no trajeto (granja → escola)")
         if is_mobile:
@@ -702,22 +702,25 @@ def render_producao(
             )
             camadas_postura.append(linha_postura)
 
-            pontos_postura = base_postura.mark_point(size=60).encode(
+            tooltip_postura = None if (is_mobile and MOBILE_REMOVER_TOOLTIP) else [
+                alt.Tooltip("data:T", title="Dia"),
+                alt.Tooltip("ovos_granja:Q", title="Ovos (granja)", format=".0f"),
+                alt.Tooltip("aves_atual:Q", title="Aves atuais", format=".0f"),
+                alt.Tooltip("postura_pct:Q", title="Postura (%)", format=".1f"),
+            ]
+
+            pontos_postura = base_postura.mark_point(size=50 if is_mobile else 60).encode(
                 y=alt.Y("postura_pct:Q", scale=y_scale_postura),
-                tooltip=[
-                    alt.Tooltip("data:T", title="Dia"),
-                    alt.Tooltip("ovos_granja:Q", title="Ovos (granja)", format=".0f"),
-                    alt.Tooltip("aves_atual:Q", title="Aves atuais", format=".0f"),
-                    alt.Tooltip("postura_pct:Q", title="Postura (%)", format=".1f"),
-                ],
+                tooltip=tooltip_postura,
             )
             camadas_postura.append(pontos_postura)
 
-            textos_postura = base_postura.mark_text(dy=-20, fontSize=10, color="white").encode(
-                y=alt.Y("postura_pct:Q", scale=y_scale_postura),
-                text=alt.Text("postura_pct:Q", format=".1f"),
-            )
-            camadas_postura.append(textos_postura)
+            if not (is_mobile and MOBILE_REMOVER_TEXTOS):
+                textos_postura = base_postura.mark_text(dy=-20, fontSize=10, color="white").encode(
+                    y=alt.Y("postura_pct:Q", scale=y_scale_postura),
+                    text=alt.Text("postura_pct:Q", format=".1f"),
+                )
+                camadas_postura.append(textos_postura)
 
             chart_postura = alt.layer(*camadas_postura).properties(
                 height=260,
