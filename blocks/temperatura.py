@@ -117,7 +117,10 @@ class GlobalScales:
 
 def _calculate_x_zoom_like_alimentacao(df: pd.DataFrame, date_col: str, janela_dias: int) -> GlobalScales:
     """
-    Ajustado para respeitar as datas do dataframe e não forçar ir até HOJE.
+    Ajustado para ficar igual aos outros blocos:
+    - O eixo X SEMPRE termina em HOJE (ou em uma data futura se existir dado futuro)
+    - start = max(min_dt, end_dt - janela)
+    - domain = [start, end]
     """
     x_axis = make_x_axis_dia_pt("Dia")
     today = pd.Timestamp.today().normalize()
@@ -133,7 +136,7 @@ def _calculate_x_zoom_like_alimentacao(df: pd.DataFrame, date_col: str, janela_d
     min_dt = dates.min()
 
     max_dt_norm = max_dt.normalize() if hasattr(max_dt, "normalize") else max_dt
-    end_dt = max_dt_norm  # Agora ele termina na última data dos dados
+    end_dt = max(today, max_dt_norm)
 
     start_dt = max(min_dt, end_dt - pd.Timedelta(days=int(janela_dias)))
     return GlobalScales(x_axis=x_axis, x_scale=alt.Scale(domain=[start_dt, end_dt]))
@@ -454,7 +457,23 @@ def pick_worst_turno_thi(df_summary_thi: pd.DataFrame) -> str:
 # 5) GRÁFICOS (somente temperatura)
 # =============================================================================
 def build_chart_media_diaria(df_d_plot: pd.DataFrame, cfg: TemperaturaConfig) -> alt.Chart:
+    # >>> ADIÇÃO (igual aos outros blocos):
+    # garante que "HOJE" exista no dataset para o eixo X ir até hoje
     df_plot = df_d_plot.copy()
+    today = pd.Timestamp.today().normalize()
+    if "dt" in df_plot.columns:
+        dt_norm = pd.to_datetime(df_plot["dt"], errors="coerce").dt.normalize()
+        if not (dt_norm == today).any():
+            ghost = pd.DataFrame(
+                {
+                    "dt": [today],
+                    "temp_media_d": [pd.NA],
+                    "ref_min": [cfg.conforto_min],
+                    "ref_max": [cfg.conforto_max],
+                }
+            )
+            df_plot = pd.concat([df_plot, ghost], ignore_index=True).sort_values("dt")
+    # <<<
 
     x = _calculate_x_zoom_like_alimentacao(df_plot, "dt", cfg.janela_inicial_dias)
 
@@ -586,12 +605,17 @@ def build_chart_turnos_heatmap(df_turnos: pd.DataFrame, cfg: TemperaturaConfig) 
 
     min_d = df_h["dia_ini"].min()
     max_d = df_h["dia_ini"].max()
+    today = pd.Timestamp.today().normalize()
 
     if pd.isna(min_d) or pd.isna(max_d):
-        return alt.Chart(pd.DataFrame()).mark_rect()
+        min_d, max_d = today, today
+
+    # >>> AJUSTE: fim do heatmap acompanha HOJE (como nos outros)
+    max_d = max(max_d, today)
 
     start_d = max(min_d, max_d - pd.Timedelta(days=int(cfg.janela_inicial_dias)))
     end_d = max_d + pd.Timedelta(days=1)  # mantém a célula do dia completo
+    # <<<
 
     domain_min = float(cfg.heatmap_domain_min)
     domain_max = float(cfg.heatmap_domain_max)
@@ -701,6 +725,7 @@ def render_temperatura(
     conforto_max: float = CFG.conforto_max,
     pasta_aux: str = "auxs",
 ) -> None:
+    _ = (ini, fim)
 
     cfg = TemperaturaConfig(
         janela_inicial_dias=int(CFG.janela_inicial_dias),
@@ -731,18 +756,8 @@ def render_temperatura(
         return
 
     df_raw = _read_and_normalize_estacao_csv(csv_path)
-
-    # --- Filtro por data inicial e final ---
-    if ini is not None:
-        df_raw = df_raw[df_raw["dt"] >= pd.to_datetime(ini)]
-    if fim is not None:
-        # Adiciona 1 dia e retira 1 segundo para incluir até as 23:59:59 do último dia
-        fim_ajustado = pd.to_datetime(fim) + pd.Timedelta(days=1, seconds=-1)
-        df_raw = df_raw[df_raw["dt"] <= fim_ajustado]
-    # ---------------------------------------
-
     if df_raw.empty:
-        st.info("Arquivo sem dados válidos para o período selecionado.")
+        st.info("Arquivo sem dados válidos.")
         return
 
     root = _project_root()
