@@ -725,7 +725,7 @@ def render_temperatura(
     conforto_max: float = CFG.conforto_max,
     pasta_aux: str = "auxs",
 ) -> None:
-    _ = (ini, fim)
+#    _ = (ini, fim)
 
     cfg = TemperaturaConfig(
         janela_inicial_dias=int(CFG.janela_inicial_dias),
